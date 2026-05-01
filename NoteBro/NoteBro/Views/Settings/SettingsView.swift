@@ -23,6 +23,7 @@ struct SettingsView: View {
                     obsidianSection
                     defaultsSection
                     automationSection
+                    supportSection
                 }
                 .padding(24)
             }
@@ -159,6 +160,41 @@ struct SettingsView: View {
             settingsToggle("Auto-transcribe after recording", isOn: $autoTranscribe)
             settingsToggle("Auto-summarize after transcription", isOn: $autoSummarize)
             settingsToggle("Auto-export to Obsidian", isOn: $autoExport)
+        }
+        .padding(20)
+        .nbCard()
+    }
+
+    private var supportSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Support")
+                .font(.nbSerif(18, weight: .semibold))
+                .foregroundStyle(NB.primary)
+
+            NavigationLink {
+                ReportBugView()
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "ladybug.fill")
+                        .foregroundStyle(NB.accent)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Report Bug")
+                            .font(.nbSerif(15, weight: .semibold))
+                            .foregroundStyle(NB.primary)
+                        Text("Open a pre-filled GitHub issue")
+                            .font(.nbSerif(13))
+                            .foregroundStyle(NB.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NB.ghost)
+                }
+                .padding(12)
+                .background(NB.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
         .padding(20)
         .nbCard()

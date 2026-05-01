@@ -1,8 +1,9 @@
 import AVFoundation
 import Foundation
 
+@MainActor
 @Observable
-final class AudioRecorder {
+final class AudioRecorder: NSObject {
     var isRecording = false
     var isPaused = false
     var currentPower: Float = 0
@@ -10,8 +11,7 @@ final class AudioRecorder {
     var recordingURL: URL?
     var permissionGranted = false
 
-    private var audioEngine: AVAudioEngine?
-    private var audioFile: AVAudioFile?
+    private var recorder: AVAudioRecorder?
     private var timer: Timer?
     private var startTime: Date?
     private var pausedDuration: TimeInterval = 0
@@ -42,86 +42,54 @@ final class AudioRecorder {
     }
 
     func startRecording() async throws {
+        guard !isRecording else { return }
         guard await requestPermission() else {
             throw RecorderError.permissionDenied
         }
 
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, options: [.defaultToSpeaker, .allowBluetooth])
+        try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
         try session.setActive(true)
-
-        let engine = AVAudioEngine()
-        let inputNode = engine.inputNode
-        let inputFormat = inputNode.outputFormat(forBus: 0)
 
         let fileName = "recording_\(UUID().uuidString).m4a"
         let fileURL = recordingsDirectory.appendingPathComponent(fileName)
-
-        let outputSettings: [String: Any] = [
+        let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: inputFormat.sampleRate,
+            AVSampleRateKey: 44_100,
             AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
         ]
 
-        let file = try AVAudioFile(forWriting: fileURL, settings: outputSettings)
+        let audioRecorder = try AVAudioRecorder(url: fileURL, settings: settings)
+        audioRecorder.isMeteringEnabled = true
+        audioRecorder.prepareToRecord()
 
-        let monoFormat = AVAudioFormat(
-            standardFormatWithSampleRate: inputFormat.sampleRate,
-            channels: 1
-        )!
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: monoFormat) { [weak self] buffer, _ in
-            guard let self else { return }
-            if !self.isPaused {
-                try? file.write(from: buffer)
-            }
-
-            let channelData = buffer.floatChannelData?[0]
-            let frameLength = Int(buffer.frameLength)
-            var rms: Float = 0
-            if let data = channelData, frameLength > 0 {
-                var sum: Float = 0
-                for i in 0..<frameLength {
-                    sum += data[i] * data[i]
-                }
-                rms = sqrtf(sum / Float(frameLength))
-            }
-            let normalized = min(rms * 5, 1.0)
-
-            Task { @MainActor in
-                self.currentPower = normalized
-            }
+        guard audioRecorder.record() else {
+            throw RecorderError.startFailed
         }
 
-        try engine.start()
-
-        audioEngine = engine
-        audioFile = file
+        recorder = audioRecorder
         recordingURL = fileURL
         isRecording = true
         isPaused = false
-        startTime = Date()
-        pausedDuration = 0
+        currentPower = 0
         elapsedTime = 0
+        pausedDuration = 0
+        pauseStart = nil
+        startTime = Date()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, let start = self.startTime else { return }
-            if !self.isPaused {
-                self.elapsedTime = Date().timeIntervalSince(start) - self.pausedDuration
-            }
-        }
+        startMeterTimer()
     }
 
     func stopRecording() -> URL? {
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
-        audioFile = nil
+        recorder?.stop()
+        recorder = nil
         timer?.invalidate()
         timer = nil
         isRecording = false
         isPaused = false
+        currentPower = 0
+        pauseStart = nil
 
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 
@@ -130,9 +98,10 @@ final class AudioRecorder {
 
     func pauseRecording() {
         guard isRecording, !isPaused else { return }
+        recorder?.pause()
         isPaused = true
+        currentPower = 0
         pauseStart = Date()
-        audioEngine?.pause()
     }
 
     func resumeRecording() {
@@ -140,9 +109,9 @@ final class AudioRecorder {
         if let pauseStart {
             pausedDuration += Date().timeIntervalSince(pauseStart)
         }
+        recorder?.record()
         isPaused = false
         pauseStart = nil
-        try? audioEngine?.start()
     }
 
     var relativeRecordingPath: String? {
@@ -150,12 +119,38 @@ final class AudioRecorder {
         return "Recordings/\(url.lastPathComponent)"
     }
 
+    private func startMeterTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.isRecording, let start = self.startTime else { return }
+
+                if !self.isPaused {
+                    self.elapsedTime = Date().timeIntervalSince(start) - self.pausedDuration
+                    self.recorder?.updateMeters()
+                    let averagePower = self.recorder?.averagePower(forChannel: 0) ?? -80
+                    self.currentPower = Self.normalizedPower(fromDecibels: averagePower)
+                }
+            }
+        }
+    }
+
+    private static func normalizedPower(fromDecibels decibels: Float) -> Float {
+        guard decibels > -80 else { return 0 }
+        return min(max((decibels + 80) / 80, 0), 1)
+    }
+
     enum RecorderError: LocalizedError {
         case permissionDenied
+        case startFailed
 
         var errorDescription: String? {
             switch self {
-            case .permissionDenied: "Microphone access is required to record meetings."
+            case .permissionDenied:
+                "Microphone access is required to record meetings."
+            case .startFailed:
+                "Recording could not be started. Please try again."
             }
         }
     }
